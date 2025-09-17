@@ -23,7 +23,7 @@ An automated remediation controller for Fleet that intelligently retries failed 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/AdamBaali/fleet-policy-retry-controller.git
+git clone https://github.com/AdamBaali/fleet-policy-retry.git
 cd fleet-policy-retry-controller
 ```
 
