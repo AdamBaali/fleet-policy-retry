@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # fleet-retry-controller.sh
-# Purpose: Automatically retry Fleet policy automations (scripts/software installs) on failing hosts
-# Requirements: bash, curl, jq
+# Purpose: Retry Fleet policy automations on hosts that are failing policies
 # 
 # Environment Variables:
 #   FLEET_URL   - Fleet server URL (e.g., https://fleet.example.com)
@@ -16,20 +15,25 @@
 set -euo pipefail
 
 # Script configuration
-SCRIPT_VERSION="1.0.0"
-SCRIPT_NAME="fleet-retry-controller"
+SCRIPT_VERSION="1.0.1"
 
-# Environment validation
-: "${FLEET_URL:?Error: FLEET_URL environment variable is required}"
-: "${FLEET_TOKEN:?Error: FLEET_TOKEN environment variable is required}"
+# Environment validation with clear errors (similar to Fleet's error patterns)
+if [[ -z "${FLEET_URL:-}" ]]; then
+  echo "Error: FLEET_URL environment variable is required" >&2
+  exit 1
+fi
 
-# Default configuration
-API_SLEEP="${API_SLEEP:-0.3}"                    # Sleep between API calls
-MAX_RETRIES="${MAX_RETRIES:-3}"                  # Maximum retry attempts
+if [[ -z "${FLEET_TOKEN:-}" ]]; then
+  echo "Error: FLEET_TOKEN environment variable is required" >&2
+  exit 1
+fi
+
+# Configuration
+API_SLEEP="${API_SLEEP:-0.3}"
+MAX_RETRIES="${MAX_RETRIES:-3}"
 CACHE_FILE="${CACHE_FILE:-$HOME/.fleet_retry_cache.db}"
-LOG_LEVEL="${LOG_LEVEL:-INFO}"                   # DEBUG, INFO, WARN, ERROR
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
 DRY_RUN=false
-VERBOSE=false
 TEAMS_FILTER=""
 EXCLUDE_POLICIES=""
 LOG_FILE=""
@@ -37,7 +41,7 @@ LOG_FILE=""
 # Backoff schedule (seconds): 30min -> 2h -> 6h -> 24h
 BACKOFF_SCHEDULE=(1800 7200 21600 86400)
 
-# Statistics tracking
+# Statistics
 declare -A STATS=(
     [hosts_processed]=0
     [scripts_triggered]=0
@@ -49,74 +53,30 @@ declare -A STATS=(
     [teams_processed]=0
 )
 
-# Utility functions
-now_ts() { date +%s; }
-iso_timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-
+# Logging - similar to Fleet's logging patterns
 log() {
     local level="$1"
-    shift
-    local message="$*"
-    local timestamp="$(iso_timestamp)"
+    local message="$2"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     
-    # Check log level
+    # Filter by log level
     case "$LOG_LEVEL" in
         DEBUG) [[ "$level" =~ ^(DEBUG|INFO|WARN|ERROR)$ ]] || return ;;
         INFO)  [[ "$level" =~ ^(INFO|WARN|ERROR)$ ]] || return ;;
         WARN)  [[ "$level" =~ ^(WARN|ERROR)$ ]] || return ;;
         ERROR) [[ "$level" = "ERROR" ]] || return ;;
+        *) LOG_LEVEL="INFO"; [[ "$level" =~ ^(INFO|WARN|ERROR)$ ]] || return ;;
     esac
     
-    local log_line="[$timestamp] $level: $message"
-    echo "$log_line" >&2
+    echo "[$timestamp] $level: $message" >&2
     
-    # Also log to file if specified
     if [[ -n "$LOG_FILE" ]]; then
-        echo "$log_line" >> "$LOG_FILE"
+        echo "[$timestamp] $level: $message" >> "$LOG_FILE"
     fi
 }
 
-show_usage() {
-    cat << EOF
-Fleet Policy Remediation Controller v$SCRIPT_VERSION
-
-Usage: $0 [OPTIONS]
-
-OPTIONS:
-    --dry-run                    Preview actions without executing
-    --verbose, -v                Enable verbose logging
-    --config=FILE                Load configuration from file
-    --teams=LIST                 Comma-separated team names to process
-    --exclude-policies=LIST      Comma-separated policy names to exclude
-    --max-retries=N              Maximum retry attempts (default: $MAX_RETRIES)
-    --log-file=FILE              Log to file in addition to stderr
-    --help, -h                   Show this help message
-    --version                    Show version information
-
-ENVIRONMENT VARIABLES:
-    FLEET_URL        Fleet server URL (required)
-    FLEET_TOKEN      Fleet API token (required)
-    API_SLEEP        Sleep between API calls (default: $API_SLEEP)
-    MAX_RETRIES      Maximum retry attempts (default: $MAX_RETRIES)
-    LOG_LEVEL        Logging level: DEBUG/INFO/WARN/ERROR (default: $LOG_LEVEL)
-
-EXAMPLES:
-    # Preview what would be retried
-    $0 --dry-run
-    
-    # Execute with verbose logging
-    $0 --verbose --log-file=/var/log/fleet-retry.log
-    
-    # Process only specific teams
-    $0 --teams="Production,Staging"
-    
-    # Exclude problematic policies
-    $0 --exclude-policies="Legacy Script,Broken Install"
-
-EOF
-}
-
-# Parse command line arguments
+# Parse arguments - Fleet CLI tools use similar patterns
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -125,19 +85,7 @@ parse_args() {
                 shift
                 ;;
             --verbose|-v)
-                VERBOSE=true
                 LOG_LEVEL="DEBUG"
-                shift
-                ;;
-            --config=*)
-                local config_file="${1#*=}"
-                if [[ -f "$config_file" ]]; then
-                    # shellcheck source=/dev/null
-                    source "$config_file"
-                else
-                    log ERROR "Configuration file not found: $config_file"
-                    exit 1
-                fi
                 shift
                 ;;
             --teams=*)
@@ -151,13 +99,19 @@ parse_args() {
             --max-retries=*)
                 MAX_RETRIES="${1#*=}"
                 if ! [[ "$MAX_RETRIES" =~ ^[0-9]+$ ]]; then
-                    log ERROR "Invalid max-retries value: $MAX_RETRIES"
+                    log "ERROR" "Invalid max-retries value: $MAX_RETRIES"
                     exit 1
                 fi
                 shift
                 ;;
             --log-file=*)
                 LOG_FILE="${1#*=}"
+                # Create parent directory if needed
+                mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+                touch "$LOG_FILE" 2>/dev/null || {
+                    log "ERROR" "Cannot write to log file: $LOG_FILE"
+                    exit 1
+                }
                 shift
                 ;;
             --help|-h)
@@ -165,11 +119,11 @@ parse_args() {
                 exit 0
                 ;;
             --version)
-                echo "$SCRIPT_NAME v$SCRIPT_VERSION"
+                echo "fleet-retry-controller v$SCRIPT_VERSION"
                 exit 0
                 ;;
             *)
-                log ERROR "Unknown option: $1"
+                log "ERROR" "Unknown option: $1"
                 show_usage
                 exit 1
                 ;;
@@ -177,7 +131,39 @@ parse_args() {
     done
 }
 
-# API helper functions
+show_usage() {
+    cat << EOF
+fleet-retry-controller v$SCRIPT_VERSION
+
+Usage: fleet-retry-controller.sh [OPTIONS]
+
+OPTIONS:
+    --dry-run                Preview actions without executing
+    --verbose, -v            Enable verbose logging
+    --teams=LIST             Comma-separated team names to process
+    --exclude-policies=LIST  Comma-separated policy names to exclude
+    --max-retries=N          Maximum retry attempts (default: $MAX_RETRIES)
+    --log-file=FILE          Log to file in addition to stderr
+    --help, -h               Show this help message
+    --version                Show version information
+
+ENVIRONMENT VARIABLES:
+    FLEET_URL     Fleet server URL (required)
+    FLEET_TOKEN   Fleet API token (required)
+    API_SLEEP     Sleep between API calls (default: $API_SLEEP)
+    MAX_RETRIES   Maximum retry attempts (default: $MAX_RETRIES)
+    LOG_LEVEL     Logging level: DEBUG/INFO/WARN/ERROR (default: $LOG_LEVEL)
+
+EXAMPLES:
+    # Preview what would be retried
+    ./fleet-retry-controller.sh --dry-run
+    
+    # Process only specific teams
+    ./fleet-retry-controller.sh --teams="Production,Staging"
+EOF
+}
+
+# API functions - simplified error handling like Fleet's Go code
 api_call() {
     local method="$1"
     local path="$2"
@@ -186,129 +172,153 @@ api_call() {
     
     response_file=$(mktemp)
     
-    local curl_args=(
-        -sfS
+    local curl_cmd=(
+        curl -sfS
         --retry 3
         --retry-delay 1
-        --connect-timeout 30
-        --max-time 120
         -H "Authorization: Bearer $FLEET_TOKEN"
         -H "Content-Type: application/json"
+        -w "%{http_code}"
         -o "$response_file"
     )
     
     if [[ "$method" = "POST" && -n "$data" ]]; then
-        curl_args+=(-X POST -d "$data")
+        curl_cmd+=(-X POST -d "$data")
     fi
     
-    if curl "${curl_args[@]}" "$FLEET_URL$path"; then
-        cat "$response_file"
-        rm -f "$response_file"
-        sleep "$API_SLEEP"
-        return 0
+    # Clean URL
+    local url="${FLEET_URL%/}$path"
+    
+    local status_code
+    if status_code=$(${curl_cmd[@]} "$url"); then
+        if [[ "$status_code" =~ ^2[0-9][0-9]$ ]]; then
+            cat "$response_file"
+            rm -f "$response_file"
+            sleep "$API_SLEEP"
+            return 0
+        else
+            log "ERROR" "API $method $path failed with status $status_code"
+            rm -f "$response_file"
+            ((STATS[api_errors]++))
+            return 1
+        fi
     else
-        local exit_code=$?
+        log "ERROR" "API request to $path failed"
         rm -f "$response_file"
         ((STATS[api_errors]++))
-        log ERROR "API call failed: $method $path (exit code: $exit_code)"
-        return $exit_code
+        return 1
     fi
 }
 
-api_get() {
-    api_call "GET" "$@"
-}
+api_get() { api_call "GET" "$@"; }
 
 api_post() {
     if [[ "$DRY_RUN" = true ]]; then
-        log INFO "[DRY-RUN] Would POST to $1 with data: $2"
+        log "INFO" "[DRY-RUN] Would POST to $1 with data: $2"
         return 0
     fi
     api_call "POST" "$@"
 }
 
-# Cache management functions
+# Cache functions
 cache_init() {
-    touch "$CACHE_FILE"
-    # Clean up old entries (older than 7 days)
-    local cutoff=$(($(now_ts) - 604800))
-    if [[ -f "$CACHE_FILE" ]]; then
-        awk -F'|' -v cutoff="$cutoff" '$2 >= cutoff' "$CACHE_FILE" > "$CACHE_FILE.tmp" || true
-        mv "$CACHE_FILE.tmp" "$CACHE_FILE"
-    fi
+    # Create parent directory if needed
+    mkdir -p "$(dirname "$CACHE_FILE")" 2>/dev/null || true
+    touch "$CACHE_FILE" || {
+        log "ERROR" "Cannot write to cache file: $CACHE_FILE"
+        exit 1
+    }
+    
+    # Clean old entries (>7 days)
+    local cutoff
+    cutoff=$(($(date +%s) - 604800))
+    local tmp_file
+    tmp_file=$(mktemp)
+    
+    awk -F'|' -v cutoff="$cutoff" '$2 >= cutoff' "$CACHE_FILE" > "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$CACHE_FILE"
 }
 
 cache_get() {
     local key="$1"
-    grep -E "^${key//\//\\/}\\|" "$CACHE_FILE" 2>/dev/null || true
+    local escaped_key
+    
+    escaped_key=$(echo "$key" | sed 's/[\/&]/\\&/g')
+    grep -E "^${escaped_key}\\|" "$CACHE_FILE" 2>/dev/null || true
 }
 
-cache_upsert() {
+cache_set() {
     local key="$1"
     local timestamp="$2"
     local retry_count="$3"
+    local tmp_file
+    local escaped_key
     
-    # Remove existing entry
-    grep -vE "^${key//\//\\/}\\|" "$CACHE_FILE" 2>/dev/null > "$CACHE_FILE.tmp" || true
-    # Add new entry
-    printf "%s|%s|%s\n" "$key" "$timestamp" "$retry_count" >> "$CACHE_FILE.tmp"
-    mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+    tmp_file=$(mktemp)
+    escaped_key=$(echo "$key" | sed 's/[\/&]/\\&/g')
+    
+    grep -vE "^${escaped_key}\\|" "$CACHE_FILE" > "$tmp_file" 2>/dev/null || true
+    printf "%s|%s|%s\n" "$key" "$timestamp" "$retry_count" >> "$tmp_file"
+    mv "$tmp_file" "$CACHE_FILE"
 }
 
-get_backoff_seconds() {
-    local retry_count="$1"
-    local index=$((retry_count - 1))
-    
-    if [[ $index -lt 0 ]]; then
-        echo 0
-    elif [[ $index -ge ${#BACKOFF_SCHEDULE[@]} ]]; then
-        echo "${BACKOFF_SCHEDULE[-1]}"
-    else
-        echo "${BACKOFF_SCHEDULE[$index]}"
-    fi
-}
-
+# Check if retry needed based on backoff
 should_retry() {
     local cache_key="$1"
     local cache_entry
+    
     cache_entry=$(cache_get "$cache_key")
     
     if [[ -z "$cache_entry" ]]; then
-        log DEBUG "No cache entry for $cache_key, proceeding with retry"
-        return 0  # No cache entry, proceed
+        log "DEBUG" "First retry for $cache_key"
+        return 0  # First try
     fi
     
+    # Parse cache entry
     local last_timestamp retry_count
     IFS='|' read -r _ last_timestamp retry_count <<< "$cache_entry"
     
+    # Check max retries
     if [[ $retry_count -ge $MAX_RETRIES ]]; then
-        log DEBUG "Max retries ($MAX_RETRIES) reached for $cache_key"
+        log "DEBUG" "Max retries reached for $cache_key"
         ((STATS[skipped_max_retries]++))
-        return 1  # Max retries reached
+        return 1
     fi
     
+    # Get backoff time
+    local index=$((retry_count - 1))
     local backoff_seconds
-    backoff_seconds=$(get_backoff_seconds "$retry_count")
-    local elapsed=$(($(now_ts) - last_timestamp))
+    
+    if [[ $index -lt 0 ]]; then
+        backoff_seconds=0
+    elif [[ $index -ge ${#BACKOFF_SCHEDULE[@]} ]]; then
+        backoff_seconds="${BACKOFF_SCHEDULE[-1]}"
+    else
+        backoff_seconds="${BACKOFF_SCHEDULE[$index]}"
+    fi
+    
+    # Check if backoff period has passed
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$((now - last_timestamp))
     
     if [[ $elapsed -lt $backoff_seconds ]]; then
-        local remaining=$((backoff_seconds - elapsed))
-        log DEBUG "Backoff period not elapsed for $cache_key (${remaining}s remaining)"
+        log "DEBUG" "In backoff period for $cache_key ($((backoff_seconds - elapsed))s remaining)"
         ((STATS[skipped_backoff]++))
-        return 1  # Still in backoff period
+        return 1
     fi
     
-    log DEBUG "Ready to retry $cache_key (attempt $((retry_count + 1)))"
-    return 0  # Ready to retry
+    log "DEBUG" "Ready to retry $cache_key (attempt $((retry_count + 1)))"
+    return 0
 }
 
-# Fleet API interaction functions
+# Fleet interaction functions
 run_script_on_host() {
     local host_id="$1"
     local script_id="$2"
     local policy_name="$3"
     
-    log INFO "Running script $script_id on host $host_id for policy '$policy_name'"
+    log "INFO" "Running script $script_id on host $host_id for policy '$policy_name'"
     
     local payload
     payload=$(jq -n \
@@ -317,102 +327,105 @@ run_script_on_host() {
         '{host_id: $host_id, script_id: $script_id}')
     
     if api_post "/api/v1/fleet/scripts/run" "$payload" >/dev/null; then
-        log INFO "Successfully triggered script $script_id on host $host_id"
+        log "INFO" "Script triggered for host $host_id"
         ((STATS[scripts_triggered]++))
         return 0
     else
-        log ERROR "Failed to trigger script $script_id on host $host_id"
+        log "ERROR" "Failed to trigger script for host $host_id"
         return 1
     fi
 }
 
 install_software_on_host() {
     local host_id="$1"
-    local software_title_id="$2"
+    local software_id="$2"
     local policy_name="$3"
     
-    log INFO "Installing software $software_title_id on host $host_id for policy '$policy_name'"
+    log "INFO" "Installing software $software_id on host $host_id for policy '$policy_name'"
     
-    if api_post "/api/v1/fleet/hosts/$host_id/software/$software_title_id/install" "{}" >/dev/null; then
-        log INFO "Successfully triggered software install $software_title_id on host $host_id"
+    if api_post "/api/v1/fleet/hosts/$host_id/software/$software_id/install" "{}" >/dev/null; then
+        log "INFO" "Software install triggered for host $host_id"
         ((STATS[software_triggered]++))
         return 0
     else
-        log ERROR "Failed to trigger software install $software_title_id on host $host_id"
+        log "ERROR" "Failed to trigger software install for host $host_id"
         return 1
     fi
 }
 
+# Filter functions
 should_process_team() {
     local team_name="$1"
     
     if [[ -z "$TEAMS_FILTER" ]]; then
-        return 0  # No filter, process all teams
+        return 0  # No filter, process all
     fi
     
-    # Check if team name is in the comma-separated filter list
     local IFS=','
     for filter_team in $TEAMS_FILTER; do
+        filter_team=$(echo "$filter_team" | xargs)
         if [[ "$team_name" = "$filter_team" ]]; then
             return 0
         fi
     done
     
-    return 1  # Team not in filter list
+    return 1  # Not in filter
 }
 
 should_process_policy() {
     local policy_name="$1"
     
     if [[ -z "$EXCLUDE_POLICIES" ]]; then
-        return 0  # No exclusions, process all policies
+        return 0  # No exclusions
     fi
     
-    # Check if policy name is in the comma-separated exclusion list
     local IFS=','
     for exclude_policy in $EXCLUDE_POLICIES; do
+        exclude_policy=$(echo "$exclude_policy" | xargs)
         if [[ "$policy_name" = "$exclude_policy" ]]; then
-            return 1  # Policy is excluded
+            return 1  # Excluded
         fi
     done
     
-    return 0  # Policy not excluded
+    return 0  # Not excluded
 }
 
+# Process functions
 process_failing_hosts() {
     local team_id="$1"
     local team_name="$2"
     local policy_id="$3"
     local policy_name="$4"
     local script_id="$5"
-    local software_title_id="$6"
+    local software_id="$6"
     
-    # Check if policy has any automation configured
-    if [[ -z "$script_id" && -z "$software_title_id" ]]; then
-        log DEBUG "Policy '$policy_name' has no automation configured, skipping"
+    # Skip if no automation
+    if [[ -z "$script_id" && -z "$software_id" ]]; then
+        log "DEBUG" "Policy '$policy_name' has no automation configured"
         return 0
     fi
     
-    log DEBUG "Processing failing hosts for policy '$policy_name' (ID: $policy_id)"
+    log "INFO" "Processing failing hosts for policy '$policy_name'"
     
-    # Get all hosts for the team and check their policy status
+    # Paginate through hosts
     local page=0
     local per_page=100
-    local processed_hosts=0
+    local failing_hosts=0
     
     while true; do
         local hosts_response
-        local query_params="page=$page&per_page=$per_page"
+        local query="page=$page&per_page=$per_page"
         
         if [[ "$team_id" != "global" ]]; then
-            query_params="$query_params&team_id=$team_id"
+            query="$query&team_id=$team_id"
         fi
         
-        if ! hosts_response=$(api_get "/api/v1/fleet/hosts?$query_params"); then
-            log ERROR "Failed to retrieve hosts for team $team_name"
+        if ! hosts_response=$(api_get "/api/v1/fleet/hosts?$query"); then
+            log "ERROR" "Failed to retrieve hosts for team '$team_name'"
             break
         fi
         
+        # Check if we got any hosts
         local hosts_count
         hosts_count=$(echo "$hosts_response" | jq '.hosts | length')
         
@@ -420,29 +433,30 @@ process_failing_hosts() {
             break  # No more hosts
         fi
         
-        # Process each host
+        # Process hosts
         echo "$hosts_response" | jq -c '.hosts[]' | while read -r host; do
             local host_id
             host_id=$(echo "$host" | jq -r '.id')
             
-            # Check if this host is failing the policy
+            # Check if host is failing the policy
             local policy_status
             policy_status=$(echo "$host" | jq -r --argjson pid "$policy_id" '.policies[] | select(.id == $pid) | .response // "unknown"')
             
             if [[ "$policy_status" != "fail" ]]; then
-                continue  # Host is not failing this policy
+                continue  # Not failing
             fi
             
-            ((processed_hosts++))
             ((STATS[hosts_processed]++))
+            failing_hosts=$((failing_hosts + 1))
             
+            # Check if we should retry
             local cache_key="${host_id}:${policy_id}:${team_id}"
             
             if ! should_retry "$cache_key"; then
-                continue  # Skip due to backoff or max retries
+                continue  # Skip (backoff or max retries)
             fi
             
-            # Get current retry count for cache update
+            # Get current retry count
             local cache_entry retry_count=0
             cache_entry=$(cache_get "$cache_key")
             if [[ -n "$cache_entry" ]]; then
@@ -455,25 +469,21 @@ process_failing_hosts() {
                 if run_script_on_host "$host_id" "$script_id" "$policy_name"; then
                     success=true
                 fi
-            elif [[ -n "$software_title_id" && "$software_title_id" != "null" ]]; then
-                if install_software_on_host "$host_id" "$software_title_id" "$policy_name"; then
+            elif [[ -n "$software_id" && "$software_id" != "null" ]]; then
+                if install_software_on_host "$host_id" "$software_id" "$policy_name"; then
                     success=true
                 fi
             fi
             
-            # Update cache with new attempt
-            cache_upsert "$cache_key" "$(now_ts)" "$((retry_count + 1))"
-            
-            if [[ "$success" = false ]]; then
-                log WARN "Remediation failed for host $host_id, policy '$policy_name'"
-            fi
+            # Update retry count
+            cache_set "$cache_key" "$(date +%s)" "$((retry_count + 1))"
         done
         
         page=$((page + 1))
     done
     
-    if [[ $processed_hosts -gt 0 ]]; then
-        log INFO "Processed $processed_hosts failing hosts for policy '$policy_name'"
+    if [[ $failing_hosts -gt 0 ]]; then
+        log "INFO" "Processed $failing_hosts failing hosts for policy '$policy_name'"
     fi
 }
 
@@ -482,14 +492,14 @@ process_team_policies() {
     local team_name="$2"
     
     if ! should_process_team "$team_name"; then
-        log DEBUG "Skipping team '$team_name' due to filter"
+        log "DEBUG" "Skipping team '$team_name' (not in filter)"
         return 0
     fi
     
-    log INFO "Processing policies for team: $team_name (ID: $team_id)"
+    log "INFO" "Processing team: $team_name"
     ((STATS[teams_processed]++))
     
-    # Get policies for the team
+    # Get policies for team
     local policies_endpoint
     if [[ "$team_id" = "global" ]]; then
         policies_endpoint="/api/v1/fleet/policies"
@@ -499,83 +509,75 @@ process_team_policies() {
     
     local policies_response
     if ! policies_response=$(api_get "$policies_endpoint"); then
-        log ERROR "Failed to retrieve policies for team $team_name"
+        log "ERROR" "Failed to retrieve policies for team '$team_name'"
         return 1
     fi
     
     local policies_count
     policies_count=$(echo "$policies_response" | jq '.policies | length')
-    log INFO "Found $policies_count policies in team $team_name"
+    log "INFO" "Found $policies_count policies in team '$team_name'"
     
     # Process each policy
     echo "$policies_response" | jq -c '.policies[]' | while read -r policy; do
-        local policy_id policy_name script_id software_title_id
+        local policy_id policy_name script_id software_id
         policy_id=$(echo "$policy" | jq -r '.id')
         policy_name=$(echo "$policy" | jq -r '.name')
         
         if ! should_process_policy "$policy_name"; then
-            log DEBUG "Skipping excluded policy '$policy_name'"
+            log "DEBUG" "Skipping excluded policy '$policy_name'"
             continue
         fi
         
         ((STATS[policies_processed]++))
         
         # Extract automation configuration
-        # Note: The exact structure may vary depending on Fleet version
         script_id=$(echo "$policy" | jq -r '.run_script.id // .automation.run_script.id // empty')
-        software_title_id=$(echo "$policy" | jq -r '.install_software.software_title_id // .automation.install_software.software_title_id // empty')
+        software_id=$(echo "$policy" | jq -r '.install_software.software_title_id // .automation.install_software.software_title_id // empty')
         
-        log DEBUG "Policy '$policy_name': script_id=$script_id, software_title_id=$software_title_id"
-        
-        process_failing_hosts "$team_id" "$team_name" "$policy_id" "$policy_name" "$script_id" "$software_title_id"
+        process_failing_hosts "$team_id" "$team_name" "$policy_id" "$policy_name" "$script_id" "$software_id"
     done
 }
 
-show_statistics() {
-    log INFO "=== Execution Statistics ==="
-    log INFO "Teams processed: ${STATS[teams_processed]}"
-    log INFO "Policies processed: ${STATS[policies_processed]}"
-    log INFO "Hosts processed: ${STATS[hosts_processed]}"
-    log INFO "Scripts triggered: ${STATS[scripts_triggered]}"
-    log INFO "Software installs triggered: ${STATS[software_triggered]}"
-    log INFO "Skipped (backoff): ${STATS[skipped_backoff]}"
-    log INFO "Skipped (max retries): ${STATS[skipped_max_retries]}"
-    log INFO "API errors: ${STATS[api_errors]}"
+# Show execution statistics
+show_stats() {
+    log "INFO" "=== Execution Statistics ==="
+    log "INFO" "Teams processed: ${STATS[teams_processed]}"
+    log "INFO" "Policies processed: ${STATS[policies_processed]}"
+    log "INFO" "Hosts processed: ${STATS[hosts_processed]}"
+    log "INFO" "Scripts triggered: ${STATS[scripts_triggered]}"
+    log "INFO" "Software installs triggered: ${STATS[software_triggered]}"
+    log "INFO" "Skipped (backoff): ${STATS[skipped_backoff]}"
+    log "INFO" "Skipped (max retries): ${STATS[skipped_max_retries]}"
+    log "INFO" "API errors: ${STATS[api_errors]}"
 }
 
-# Signal handlers for graceful shutdown
-cleanup() {
-    log INFO "Received interrupt signal, shutting down gracefully..."
-    show_statistics
-    exit 0
-}
+# Graceful shutdown
+trap 'log "INFO" "Shutting down..."; show_stats; exit 0' SIGINT SIGTERM
 
-trap cleanup SIGINT SIGTERM
-
-# Main execution function
+# Main function
 main() {
-    log INFO "Starting Fleet Policy Remediation Controller v$SCRIPT_VERSION"
+    log "INFO" "Starting fleet-retry-controller v$SCRIPT_VERSION"
     
     if [[ "$DRY_RUN" = true ]]; then
-        log INFO "Running in DRY-RUN mode - no actions will be executed"
+        log "INFO" "Running in dry-run mode (no actions will be taken)"
     fi
     
     cache_init
     
-    # Get all teams
+    # Process global policies first
+    log "INFO" "Processing global policies"
+    process_team_policies "global" "Global"
+    
+    # Get and process teams
     local teams_response
     if ! teams_response=$(api_get "/api/v1/fleet/teams"); then
-        log ERROR "Failed to retrieve teams"
+        log "ERROR" "Failed to retrieve teams"
         exit 1
     fi
     
     local teams_count
     teams_count=$(echo "$teams_response" | jq '.teams | length')
-    log INFO "Found $teams_count teams"
-    
-    # Process global policies first (if any exist)
-    log DEBUG "Processing global policies"
-    process_team_policies "global" "Global"
+    log "INFO" "Found $teams_count teams"
     
     # Process each team
     echo "$teams_response" | jq -c '.teams[]' | while read -r team; do
@@ -586,11 +588,11 @@ main() {
         process_team_policies "$team_id" "$team_name"
     done
     
-    show_statistics
-    log INFO "Fleet Policy Remediation Controller completed successfully"
+    show_stats
+    log "INFO" "Fleet policy retry controller completed successfully"
 }
 
-# Script entry point
+# Entry point
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     parse_args "$@"
     main
