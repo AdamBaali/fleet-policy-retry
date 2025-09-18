@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# fleet-retry-final.sh
+# fleet-retry-controller.sh
 # Purpose: Retry Fleet policy automations on hosts that are failing policies
 # Updated with correct Fleet API endpoints for both script and software automation
 # 
 # Usage:
-#   ./fleet-retry-final.sh --dry-run   # Preview actions
-#   ./fleet-retry-final.sh             # Execute retries
+#   ./fleet-retry-controller.sh --dry-run   # Preview actions
+#   ./fleet-retry-controller.sh             # Execute retries
 
 set -euo pipefail
 
@@ -127,7 +127,7 @@ parse_args() {
                 exit 0
                 ;;
             --version)
-                echo "fleet-retry-final v$SCRIPT_VERSION"
+                echo "Fleet Policy Retry Controller v$SCRIPT_VERSION"
                 exit 0
                 ;;
             *)
@@ -141,9 +141,9 @@ parse_args() {
 
 show_usage() {
     cat << EOF
-fleet-retry-final v$SCRIPT_VERSION
+Fleet Policy Retry Controller v$SCRIPT_VERSION
 
-Usage: fleet-retry-final.sh [OPTIONS]
+Usage: fleet-retry-controller.sh [OPTIONS]
 
 OPTIONS:
     --dry-run                Preview actions without executing
@@ -162,10 +162,10 @@ CONFIGURATION:
 
 EXAMPLES:
     # Preview what would be retried
-    ./fleet-retry-final.sh --dry-run
-    
+    ./fleet-retry-controller.sh --dry-run
+
     # Process only specific teams
-    ./fleet-retry-final.sh --teams="Production,Staging"
+    ./fleet-retry-controller.sh --teams="Production,Staging"
 EOF
 }
 
@@ -708,7 +708,7 @@ trap 'log "INFO" "Shutting down..."; show_stats; exit 0' SIGINT SIGTERM
 
 # Main function
 main() {
-    log "INFO" "Starting fleet-retry-final v$SCRIPT_VERSION"
+    log "INFO" "Starting Fleet Policy Retry Controller v$SCRIPT_VERSION"
     
     if [[ "$DRY_RUN" = true ]]; then
         log "INFO" "Running in dry-run mode (no actions will be taken)"
