@@ -128,20 +128,11 @@ The script provides comprehensive statistics including:
 - Hosts skipped due to successful activity verification
 - API errors encountered
 
-## 🔍 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| **API errors** | Verify Fleet URL and token are correct |
-| **Script/software issues** | Check that scripts and software packages exist in Fleet |
-| **Network issues** | Ensure connectivity between script host and Fleet server |
-| **Permission errors** | Verify API token has sufficient permissions |
-
 ### Debug Mode
 
 For detailed troubleshooting information:
 ```bash
-./fleet-retry-controller.sh --verbose --dry-run
+./fleet-retry-controller.sh --verbose
 ```
 
 ## 📝 License
