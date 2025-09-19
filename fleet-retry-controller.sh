@@ -60,6 +60,7 @@ policies_processed=0
 teams_processed=0
 skipped_backoff=0
 skipped_max_retries=0
+skipped_activity_success=0
 
 # Logging
 log() {
@@ -388,6 +389,78 @@ install_software_on_host() {
     fi
 }
 
+# Get host activity feed from Fleet API
+get_host_activities() {
+    local host_id="$1"
+    
+    log "DEBUG" "Fetching activity feed for host ID $host_id"
+    local activities_response
+    
+    # Use Fleet API endpoint for host activities
+    local endpoint="/api/v1/fleet/hosts/$host_id/activities"
+    
+    if ! activities_response=$(api_get "$endpoint"); then
+        log "WARN" "Failed to retrieve activities for host ID $host_id"
+        return 1
+    fi
+    
+    echo "$activities_response"
+    return 0
+}
+
+# Check if host has successful fleet-initiated activity for the given automation type
+has_fleet_initiated_success() {
+    local host_id="$1"
+    local script_id="$2"
+    local software_id="$3"
+    
+    log "DEBUG" "Checking fleet-initiated success for host $host_id (script: $script_id, software: $software_id)"
+    
+    # Get host activities
+    local activities_response
+    if ! activities_response=$(get_host_activities "$host_id"); then
+        log "DEBUG" "Could not retrieve activities for host $host_id, proceeding with retry"
+        return 1  # Proceed with retry if we can't check activities
+    fi
+    
+    # Check if we have valid activities response
+    if ! echo "$activities_response" | jq -e '.activities' > /dev/null 2>&1; then
+        log "DEBUG" "Invalid activities response for host $host_id, proceeding with retry"
+        return 1  # Proceed with retry if response is invalid
+    fi
+    
+    # For script automation, check for successful ran_script activities
+    if [[ -n "$script_id" && "$script_id" != "null" ]]; then
+        local script_success
+        script_success=$(echo "$activities_response" | jq -r '
+            .activities[] | 
+            select(.type == "ran_script" and .fleet_initiated == true) |
+            .details.script_execution_id // empty' | head -1)
+        
+        if [[ -n "$script_success" ]]; then
+            log "INFO" "Found fleet-initiated script execution for host $host_id, skipping retry"
+            return 0  # Success found, skip retry
+        fi
+    fi
+    
+    # For software automation, check for successful installed_software activities
+    if [[ -n "$software_id" && "$software_id" != "null" ]]; then
+        local software_success
+        software_success=$(echo "$activities_response" | jq -r '
+            .activities[] | 
+            select(.type == "installed_software" and .fleet_initiated == true and .details.status == "installed") |
+            .details.install_uuid // empty' | head -1)
+        
+        if [[ -n "$software_success" ]]; then
+            log "INFO" "Found fleet-initiated software installation for host $host_id, skipping retry"
+            return 0  # Success found, skip retry
+        fi
+    fi
+    
+    log "DEBUG" "No fleet-initiated success found for host $host_id, proceeding with retry"
+    return 1  # No success found, proceed with retry
+}
+
 # Get software details from Fleet
 get_software_details() {
     local software_id="$1"
@@ -607,6 +680,13 @@ process_failing_hosts() {
         hostname=$(echo "$host" | jq -r '.hostname // .computer_name // "unknown"')
         log "INFO" "Processing host: $hostname (ID: $host_id)"
         
+        # Check if fleet has already successfully initiated the required automation
+        if has_fleet_initiated_success "$host_id" "$script_id" "$software_id"; then
+            log "INFO" "Host $hostname already has successful fleet-initiated automation, skipping retry"
+            skipped_activity_success=$((skipped_activity_success + 1))
+            continue
+        fi
+        
         # Attempt remediation
         local success=false
         if [[ -n "$script_id" && "$script_id" != "null" ]]; then
@@ -700,6 +780,7 @@ show_stats() {
     log "INFO" "Software installs triggered: $software_triggered"
     log "INFO" "Skipped (backoff): $skipped_backoff"
     log "INFO" "Skipped (max retries): $skipped_max_retries"
+    log "INFO" "Skipped (activity success): $skipped_activity_success"
     log "INFO" "API errors: $api_errors"
 }
 
