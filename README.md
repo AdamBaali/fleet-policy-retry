@@ -5,6 +5,7 @@ An intelligent automation tool that automatically retries failed Fleet policy au
 ## ✨ Features
 
 - **Intelligent Retry Logic**: Exponential backoff scheduling (30min → 2h → 6h → 24h)
+- **Activity Checking**: Prevents unnecessary retries by checking Fleet activity feed for successful automations
 - **Dual Automation Support**: Handles both script execution and software installation automations  
 - **Team & Policy Filtering**: Process specific teams or exclude certain policies using IDs
 - **Safe Testing**: Dry run mode to preview actions before execution
@@ -81,7 +82,17 @@ FLEET_TOKEN="your-api-token"
 
 ## ⚙️ How It Works
 
-The script implements intelligent exponential backoff to prevent overwhelming systems:
+The script implements intelligent automation retry logic with activity checking:
+
+### 1. Activity Verification
+Before attempting any retry, the script checks the host's activity feed for:
+- **Script executions**: `"type": "ran_script"` with `"fleet_initiated": true`  
+- **Software installations**: `"type": "installed_software"` with `"fleet_initiated": true` and `"status": "installed"`
+
+Hosts with successful Fleet-initiated activities are skipped to prevent unnecessary duplicate operations.
+
+### 2. Exponential Backoff Schedule
+For hosts requiring retry, the script implements intelligent exponential backoff:
 
 | Retry Attempt | Wait Time | Description |
 |---------------|-----------|-------------|
@@ -91,6 +102,13 @@ The script implements intelligent exponential backoff to prevent overwhelming sy
 | 4th+ retry | 24 hours | Daily attempts for stubborn failures |
 
 After reaching the maximum retry count (default: 3), hosts require manual intervention.
+
+### 3. Fleet Activity API Integration
+The script integrates with Fleet's activity API (`/api/v1/fleet/hosts/:id/activities`) to:
+- Reduce unnecessary API calls by skipping hosts with successful Fleet-initiated automations
+- Prevent duplicate script executions and software installations
+- Provide better visibility into what Fleet has already accomplished
+- Improve overall efficiency and reduce system load
 
 ## 🔄 Management & Maintenance
 
@@ -107,6 +125,7 @@ The script provides comprehensive statistics including:
 - Teams and policies processed
 - Scripts and software installations triggered  
 - Hosts skipped due to backoff or retry limits
+- Hosts skipped due to successful activity verification
 - API errors encountered
 
 ## 🔍 Troubleshooting
