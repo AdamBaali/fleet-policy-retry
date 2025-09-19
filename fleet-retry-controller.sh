@@ -148,8 +148,8 @@ Usage: fleet-retry-controller.sh [OPTIONS]
 OPTIONS:
     --dry-run                Preview actions without executing
     --verbose, -v            Enable verbose logging
-    --teams=LIST             Comma-separated team names to process
-    --exclude-policies=LIST  Comma-separated policy names to exclude
+    --teams=LIST             Comma-separated team IDs to process
+    --exclude-policies=LIST  Comma-separated policy IDs to exclude
     --max-retries=N          Maximum retry attempts (default: $MAX_RETRIES)
     --log-file=FILE          Log to file in addition to stderr
     --help, -h               Show this help message
@@ -164,8 +164,8 @@ EXAMPLES:
     # Preview what would be retried
     ./fleet-retry-controller.sh --dry-run
 
-    # Process only specific teams
-    ./fleet-retry-controller.sh --teams="Production,Staging"
+    # Process only specific teams (using team IDs)
+    ./fleet-retry-controller.sh --teams="1,2"
 EOF
 }
 
@@ -407,16 +407,16 @@ get_software_details() {
 
 # Filter functions
 should_process_team() {
-    local team_name="$1"
+    local team_id="$1"
     
     if [[ -z "$TEAMS_FILTER" ]]; then
         return 0  # No filter, process all
     fi
     
     local IFS=','
-    for filter_team in $TEAMS_FILTER; do
-        filter_team=$(echo "$filter_team" | xargs)
-        if [[ "$team_name" = "$filter_team" ]]; then
+    for filter_team_id in $TEAMS_FILTER; do
+        filter_team_id=$(echo "$filter_team_id" | xargs)
+        if [[ "$team_id" = "$filter_team_id" ]]; then
             return 0
         fi
     done
@@ -425,16 +425,16 @@ should_process_team() {
 }
 
 should_process_policy() {
-    local policy_name="$1"
+    local policy_id="$1"
     
     if [[ -z "$EXCLUDE_POLICIES" ]]; then
         return 0  # No exclusions
     fi
     
     local IFS=','
-    for exclude_policy in $EXCLUDE_POLICIES; do
-        exclude_policy=$(echo "$exclude_policy" | xargs)
-        if [[ "$policy_name" = "$exclude_policy" ]]; then
+    for exclude_policy_id in $EXCLUDE_POLICIES; do
+        exclude_policy_id=$(echo "$exclude_policy_id" | xargs)
+        if [[ "$policy_id" = "$exclude_policy_id" ]]; then
             return 1  # Excluded
         fi
     done
@@ -634,8 +634,8 @@ process_team_policies() {
     local team_id="$1"
     local team_name="$2"
     
-    if ! should_process_team "$team_name"; then
-        log "DEBUG" "Skipping team '$team_name' (not in filter)"
+    if ! should_process_team "$team_id"; then
+        log "DEBUG" "Skipping team '$team_name' (ID: $team_id, not in filter)"
         return 0
     fi
     
@@ -668,8 +668,8 @@ process_team_policies() {
         policy_id=$(echo "$policy" | jq -r '.id')
         policy_name=$(echo "$policy" | jq -r '.name')
         
-        if ! should_process_policy "$policy_name"; then
-            log "DEBUG" "Skipping excluded policy '$policy_name'"
+        if ! should_process_policy "$policy_id"; then
+            log "DEBUG" "Skipping excluded policy '$policy_name' (ID: $policy_id)"
             continue
         fi
         

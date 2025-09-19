@@ -6,7 +6,7 @@ An intelligent automation tool that automatically retries failed Fleet policy au
 
 - **Intelligent Retry Logic**: Exponential backoff scheduling (30min → 2h → 6h → 24h)
 - **Dual Automation Support**: Handles both script execution and software installation automations  
-- **Team & Policy Filtering**: Process specific teams or exclude certain policies
+- **Team & Policy Filtering**: Process specific teams or exclude certain policies using IDs
 - **Safe Testing**: Dry run mode to preview actions before execution
 - **Comprehensive Logging**: Detailed statistics and progress tracking
 - **Production Ready**: Built-in rate limiting and error handling
@@ -56,8 +56,8 @@ FLEET_TOKEN="your-api-token"
 |--------|-------------|
 | `--dry-run` | Preview actions without executing |
 | `--verbose, -v` | Enable verbose logging |
-| `--teams=LIST` | Process specific teams (comma-separated) |
-| `--exclude-policies=LIST` | Skip specific policies (comma-separated) |
+| `--teams=LIST` | Process specific teams (comma-separated team IDs) |
+| `--exclude-policies=LIST` | Skip specific policies (comma-separated policy IDs) |
 | `--max-retries=N` | Set retry limit (default: 3) |
 | `--log-file=FILE` | Write logs to file |
 | `--help, -h` | Show help message |
@@ -69,11 +69,11 @@ FLEET_TOKEN="your-api-token"
 # Safe preview mode
 ./fleet-retry-controller.sh --dry-run --verbose
 
-# Process only production teams
-./fleet-retry-controller.sh --teams="Production,Critical"
+# Process only specific teams (using team IDs)
+./fleet-retry-controller.sh --teams="1,2"
 
-# Exclude specific policies
-./fleet-retry-controller.sh --exclude-policies="Legacy Policy,Test Policy"
+# Exclude specific policies (using policy IDs)
+./fleet-retry-controller.sh --exclude-policies="123,456"
 
 # Full logging to file
 ./fleet-retry-controller.sh --log-file=/var/log/fleet-retry.log --verbose
